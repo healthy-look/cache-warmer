@@ -11,14 +11,20 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 /* ====== KONFIG DOMAIN/PROXY/UA ====== */
 const DOMAINS_MAP = {
   id: "https://healthylook-aesthetic.com",
+  sg: "https://healthylook-aesthetic.com",
+  au: "https://healthylook-aesthetic.com",
 };
 
 const PROXIES = {
   id: process.env.BRD_PROXY_ID,
+  sg: process.env.BRD_PROXY_SG,
+  au: process.env.BRD_PROXY_AU,
 };
 
 const USER_AGENTS = {
   id: "Healthylook-CacheWarmer-ID/1.0",
+  sg: "Healthylook-CacheWarmer-SG/1.0",
+  au: "Healthylook-CacheWarmer-AU/1.0",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
@@ -159,19 +165,27 @@ async function retryableGet(url, cfg, retries = 3) {
   let lastError = null;
   for (let i = 0; i < retries; i++) {
     try {
-      return await axios.get(url, cfg);
+      const res = await axios.get(url, cfg);
+      return res;
     } catch (err) {
       lastError = err;
       const code = err?.code || "";
-      if (
-        !(
-          axios.isAxiosError(err) &&
-          ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT"].includes(code)
-        )
-      ) {
-        break;
+      const status = err?.response?.status;
+
+      // Retry untuk network errors
+      const isNetworkError = ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND"].includes(code);
+      // Retry untuk server errors (502, 503, 504)
+      const isServerError = [502, 503, 504].includes(status);
+
+      if (isNetworkError || isServerError) {
+        const retryIn = 3000 * (i + 1); // 3s, 6s, 9s (exponential backoff)
+        console.log(`⏳ Retry ${i + 1}/${retries} for ${url} (${code || status}) in ${retryIn / 1000}s...`);
+        await sleep(retryIn);
+        continue;
       }
-      await sleep(2000);
+
+      // Error lain tidak di-retry
+      break;
     }
   }
   throw lastError;
@@ -270,23 +284,26 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   const logger = new AppsScriptLogger();
 
   try {
-    await Promise.all(
-      Object.entries(DOMAINS_MAP).map(async ([country, domain]) => {
-        const sitemapList = await fetchIndexSitemaps(domain, country);
-        const urlArrays = await Promise.all(
-          sitemapList.map((s) => fetchUrlsFromSitemap(s, country))
-        );
-        const urls = urlArrays.flat().filter(Boolean);
+    // Proses berurutan per negara (tidak paralel)
+    for (const [country, domain] of Object.entries(DOMAINS_MAP)) {
+      console.log(`\n========== [${country.toUpperCase()}] Starting ==========`);
 
-        console.log(`[${country}] Found ${urls.length} URLs`);
-        logger.log({
-          country,
-          message: `Found ${urls.length} URLs for ${country}`,
-        });
+      const sitemapList = await fetchIndexSitemaps(domain, country);
+      const urlArrays = await Promise.all(
+        sitemapList.map((s) => fetchUrlsFromSitemap(s, country))
+      );
+      const urls = urlArrays.flat().filter(Boolean);
 
-        await warmUrls(urls, country, logger);
-      })
-    );
+      console.log(`[${country}] Found ${urls.length} URLs`);
+      logger.log({
+        country,
+        message: `Found ${urls.length} URLs for ${country}`,
+      });
+
+      await warmUrls(urls, country, logger);
+
+      console.log(`========== [${country.toUpperCase()}] Completed ==========\n`);
+    }
   } finally {
     logger.setFinished();
     await logger.flush();
